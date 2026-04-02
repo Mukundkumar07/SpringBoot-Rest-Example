@@ -249,6 +249,19 @@ public class BooksConntroller {
             System.err.println("Error in createNewBook: " + e.getMessage());
             e.printStackTrace();
         }
+    }
 
+    //POSTMAPING ,using stream
+@PostMapping("/api/stream/books")
+    public void createBooksUsingStreams(@RequestBody List<Book> newBooks){
+        try{
+            boolean isNewBook= books.stream().noneMatch (book->book.getTitle ().equalsIgnoreCase(newBooks.get(0).getTitle()));
+            if(isNewBook){
+                books.addAll(newBooks);
+            }
+        }catch (Exception e){
+            System.err.println("Error in createBooksUsingStreams: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 }
