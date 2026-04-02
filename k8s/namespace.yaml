@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: books-staging
+  labels:
+    name: books-staging
+    environment: staging
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: books-production
+  labels:
+    name: books-production
+    environment: production

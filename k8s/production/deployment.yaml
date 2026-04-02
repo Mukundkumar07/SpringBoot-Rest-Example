@@ -1,0 +1,337 @@
+# ============================================================================
+# PRODUCTION DEPLOYMENT - Books API (High Availability)
+# ============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: books-api
+  namespace: books-production
+  labels:
+    app: books-api
+    environment: production
+    version: v1.0.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: books-api
+      environment: production
+  template:
+    metadata:
+      labels:
+        app: books-api
+        environment: production
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      serviceAccountName: books-api-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - books-api
+              topologyKey: kubernetes.io/hostname
+      containers:
+      - name: books-api
+        image: ghcr.io/mukundkumar07/springboot-rest-example:SpringBoot-Rest-Complete
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "production"
+        - name: SERVER_PORT
+          value: "8080"
+        - name: MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE
+          value: "health,info,metrics,prometheus"
+        - name: JAVA_OPTS
+          value: "-Xmx256m -Xms256m -XX:+UseG1GC"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /actuator/health
+            port: http
+          initialDelaySeconds: 40
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /actuator/health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: cache
+          mountPath: /app/cache
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: cache
+        emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+# ============================================================================
+# SERVICE - Books API (Production)
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: books-api-service
+  namespace: books-production
+  labels:
+    app: books-api
+    environment: production
+spec:
+  type: LoadBalancer
+  selector:
+    app: books-api
+    environment: production
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+# ============================================================================
+# HORIZONTAL POD AUTOSCALER (HPA) - Production
+# ============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: books-api-hpa
+  namespace: books-production
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: books-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 2
+        periodSeconds: 15
+      selectPolicy: Max
+
+---
+# ============================================================================
+# SERVICE ACCOUNT & RBAC
+# ============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: books-api-sa
+  namespace: books-production
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: books-api-role
+  namespace: books-production
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: books-api-rolebinding
+  namespace: books-production
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: books-api-role
+subjects:
+- kind: ServiceAccount
+  name: books-api-sa
+  namespace: books-production
+
+---
+# ============================================================================
+# CONFIGMAP - Production Configuration
+# ============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: books-api-config
+  namespace: books-production
+data:
+  application.properties: |
+    spring.application.name=books-api
+    spring.profiles.active=production
+    server.port=8080
+    server.servlet.context-path=/
+    
+    # Actuator
+    management.endpoints.web.exposure.include=health,info,metrics,prometheus
+    management.endpoint.health.show-details=when-authorized
+    management.metrics.enable.jvm=true
+    management.metrics.enable.process=true
+    management.metrics.enable.system=true
+    
+    # Logging
+    logging.level.root=WARN
+    logging.level.com.love2code.books=INFO
+
+---
+# ============================================================================
+# PODMONITOR - Prometheus Integration
+# ============================================================================
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: books-api-monitor
+  namespace: books-production
+  labels:
+    app: books-api
+spec:
+  selector:
+    matchLabels:
+      app: books-api
+  podMetricsEndpoints:
+  - port: http
+    path: /actuator/prometheus
+    interval: 30s
+
+---
+# ============================================================================
+# NETWORKPOLICY - Production Security
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: books-api-netpolicy
+  namespace: books-production
+spec:
+  podSelector:
+    matchLabels:
+      app: books-api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+  - to:
+    - podSelector: {}
+
+---
+# ============================================================================
+# INGRESS - Production (Optional - requires ingress controller)
+# ============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: books-api-ingress
+  namespace: books-production
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - books-api.example.com
+    secretName: books-api-tls
+  rules:
+  - host: books-api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: books-api-service
+            port:
+              number: 80
